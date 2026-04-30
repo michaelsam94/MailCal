@@ -18,6 +18,14 @@ local.properties
 # Signing keys & secrets
 *.keystore
 *.jks
+signing.properties
+client_secret*.json
+google-services.json
+
+# Build artifacts (defense in depth; modules also ignore /build)
+*.apk
+*.aab
+*.ap_
 
 # Local tooling
 .venv/

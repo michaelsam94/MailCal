@@ -1,0 +1,14 @@
+# Copy to `local.properties` (never commit that file).
+# OAuth: create Android OAuth clients in Google Cloud Console; use the client ID only (not the client secret).
+
+# Debug / default BuildConfig.GMAIL_CLIENT_ID
+gmail.client.id=
+
+# Release build type BuildConfig.GMAIL_CLIENT_ID (optional; falls back to debug id if empty)
+gmail.client.id.release=
+
+# Release signing — paths relative to project root if using a file under the repo; prefer a path outside the repo
+RELEASE_STORE_FILE=
+RELEASE_STORE_PASSWORD=
+RELEASE_KEY_ALIAS=
+RELEASE_KEY_PASSWORD=
