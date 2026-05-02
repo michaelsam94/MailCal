@@ -1,0 +1,126 @@
+# Pushes a tag → builds APK → GitHub Release with APK attached.
+# "Run workflow" (Actions) → builds APK + artifact only (no Release; use a tag for releases).
+#
+# First time: commit and push this file to GitHub, then tag that commit.
+#
+# Optional secrets (signed release): RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD,
+#   RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD — optional GMAIL_CLIENT_ID
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Prepare signing & local.properties
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          {
+            echo "gmail.client.id=${GMAIL_CLIENT_ID:-}"
+            echo "gmail.client.id.release=${GMAIL_CLIENT_ID:-}"
+          } > local.properties
+          if [ -n "${RELEASE_KEYSTORE_BASE64:-}" ]; then
+            echo "${RELEASE_KEYSTORE_BASE64}" | base64 -d > app/ci-release.keystore
+            {
+              echo "RELEASE_STORE_FILE=ci-release.keystore"
+              echo "RELEASE_STORE_PASSWORD=${RELEASE_STORE_PASSWORD}"
+              echo "RELEASE_KEY_ALIAS=${RELEASE_KEY_ALIAS}"
+              echo "RELEASE_KEY_PASSWORD=${RELEASE_KEY_PASSWORD}"
+            } >> local.properties
+            echo "HAS_SIGNING=1" >> "$GITHUB_ENV"
+          else
+            echo "HAS_SIGNING=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APK (signed)
+        if: env.HAS_SIGNING == '1'
+        run: chmod +x gradlew && ./gradlew --no-daemon assembleRelease
+
+      - name: Build debug APK (CI fallback)
+        if: env.HAS_SIGNING != '1'
+        run: chmod +x gradlew && ./gradlew --no-daemon assembleDebug
+
+      - name: Stage artifact
+        id: artifact
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="manual-${GITHUB_RUN_NUMBER}"
+          fi
+          case "$TAG" in
+            v*) VERSION="${TAG#v}" ;;
+            *) VERSION="$TAG" ;;
+          esac
+          if [ "${HAS_SIGNING}" = "1" ]; then
+            OUT="MailCal-${VERSION}.apk"
+            cp app/build/outputs/apk/release/app-release.apk "$OUT"
+          else
+            OUT="MailCal-${VERSION}-debug.apk"
+            cp app/build/outputs/apk/debug/app-debug.apk "$OUT"
+          fi
+          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "is_tag=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_tag=0" >> "$GITHUB_OUTPUT"
+          fi
+          ls -la "$OUT"
+
+      - name: Upload APK (workflow artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailcal-${{ github.run_id }}
+          path: ${{ steps.artifact.outputs.apk_path }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: steps.artifact.outputs.is_tag == '1'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MailCal ${{ github.ref_name }}
+          make_latest: true
+          allowUpdates: true
+          fail_on_unmatched_files: true
+          body: |
+            Android build for `${{ github.ref_name }}`.
+
+            **Signed release** APK when secrets `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD` are set. Otherwise this is a **debug** APK.
+
+            Optional: `GMAIL_CLIENT_ID` for OAuth in the build.
+          files: ${{ steps.artifact.outputs.apk_path }}
