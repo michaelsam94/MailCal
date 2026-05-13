@@ -4,6 +4,7 @@ import android.content.Context
 import com.michael.mailcal.core.database.DatabaseFactory
 import com.michael.mailcal.core.network.GmailApiClient
 import com.michael.mailcal.feature_auth.data.AuthRepositoryImpl
+import com.michael.mailcal.feature_auth.data.AuthSessionStore
 import com.michael.mailcal.feature_auth.domain.AuthRepository
 import com.michael.mailcal.feature_calendar.data.CalendarRepositoryImpl
 import com.michael.mailcal.feature_calendar.domain.CalendarRepository
@@ -21,8 +22,11 @@ class AppContainer private constructor(context: Context) {
             parser = EmailEventParser()
         )
     }
+    private val authSessionStore: AuthSessionStore by lazy { AuthSessionStore(context) }
     val authRepository: AuthRepository by lazy { AuthRepositoryImpl(context, syncRepository) }
-    val calendarRepository: CalendarRepository by lazy { CalendarRepositoryImpl(context) }
+    val calendarRepository: CalendarRepository by lazy {
+        CalendarRepositoryImpl(context, authSessionStore)
+    }
 
     companion object {
         @Volatile

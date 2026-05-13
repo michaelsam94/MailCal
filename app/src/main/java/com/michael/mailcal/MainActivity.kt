@@ -30,11 +30,18 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.tooling.preview.Preview
@@ -47,6 +54,7 @@ import com.michael.mailcal.feature_auth.presentation.AuthViewModel
 import com.michael.mailcal.feature_auth.presentation.AuthUiState
 import com.michael.mailcal.feature_sync.presentation.InboxSyncUiState
 import com.michael.mailcal.feature_sync.presentation.InboxSyncViewModel
+import com.michael.mailcal.feature_sync.presentation.SnackbarMessage
 import com.michael.mailcal.worker.EmailSyncWorkerRunner
 
 class MainActivity : ComponentActivity() {
@@ -78,7 +86,37 @@ class MainActivity : ComponentActivity() {
                         authViewModel.consumeSignInIntent()
                     }
                 }
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+
+                val snackbarHostState = remember { SnackbarHostState() }
+                var lastSnackbarIsError by remember { mutableStateOf(false) }
+                LaunchedEffect(syncViewModel) {
+                    syncViewModel.snackbarEvents.collect { message ->
+                        lastSnackbarIsError = message.isError
+                        snackbarHostState.showSnackbar(
+                            message = message.text,
+                            duration = SnackbarDuration.Short
+                        )
+                    }
+                }
+
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    snackbarHost = {
+                        SnackbarHost(hostState = snackbarHostState) { data ->
+                            val container = if (lastSnackbarIsError) {
+                                Color(0xFFB00020)
+                            } else {
+                                Color(0xFF1B5E20)
+                            }
+                            Snackbar(
+                                snackbarData = data,
+                                containerColor = container,
+                                contentColor = Color.White,
+                                actionColor = Color.White
+                            )
+                        }
+                    }
+                ) { innerPadding ->
                     if (authUiState.currentUser == null) {
                         SignInScreen(
                             authState = authUiState,

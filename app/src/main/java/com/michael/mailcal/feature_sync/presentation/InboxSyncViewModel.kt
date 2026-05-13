@@ -10,8 +10,12 @@ import com.michael.mailcal.feature_calendar.domain.CalendarEvent
 import com.michael.mailcal.feature_sync.domain.ParsedEvent
 import java.text.DateFormat
 import java.util.Date
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
@@ -35,6 +39,11 @@ data class InboxSyncUiState(
     val error: String? = null
 )
 
+data class SnackbarMessage(
+    val text: String,
+    val isError: Boolean = false
+)
+
 class InboxSyncViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = AppContainer.from(application).syncRepository
     private val calendarRepository = AppContainer.from(application).calendarRepository
@@ -42,6 +51,13 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _uiState = MutableStateFlow(InboxSyncUiState())
     val uiState: StateFlow<InboxSyncUiState> = _uiState.asStateFlow()
+
+    private val _snackbarEvents = MutableSharedFlow<SnackbarMessage>(
+        replay = 0,
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val snackbarEvents: SharedFlow<SnackbarMessage> = _snackbarEvents.asSharedFlow()
 
     fun refreshPendingEvents() {
         viewModelScope.launch {
@@ -66,6 +82,7 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
                             lastSyncStatus = "Sync failed",
                             error = result.message
                         )
+                        _snackbarEvents.tryEmit(SnackbarMessage(result.message, isError = true))
                     }
                     is AppResult.Success -> {
                         val pending = repository.getPendingParsedEvents().toPendingUi()
@@ -86,14 +103,32 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
                     lastSyncStatus = "Sync failed",
                     error = t.message ?: "Unexpected sync error"
                 )
+                _snackbarEvents.tryEmit(
+                    SnackbarMessage(t.message ?: "Unexpected sync error", isError = true)
+                )
             }
         }
     }
 
     fun addPendingEventToCalendar(parsedEventId: String) {
         viewModelScope.launch {
+            val currentList = _uiState.value.pendingEvents
+            val targetUi = currentList.firstOrNull { it.parsedEventId == parsedEventId } ?: return@launch
             val pending = repository.getPendingParsedEvents()
-            val target = pending.firstOrNull { it.id == parsedEventId } ?: return@launch
+            val target = pending.firstOrNull { it.id == parsedEventId } ?: run {
+                _uiState.value = _uiState.value.copy(
+                    pendingEvents = currentList.filterNot { it.parsedEventId == parsedEventId },
+                    pendingCount = (currentList.size - 1).coerceAtLeast(0)
+                )
+                return@launch
+            }
+
+            val optimisticList = currentList.filterNot { it.parsedEventId == parsedEventId }
+            _uiState.value = _uiState.value.copy(
+                pendingEvents = optimisticList,
+                pendingCount = optimisticList.size
+            )
+
             val createResult = calendarRepository.createEvent(
                 CalendarEvent(
                     id = "",
@@ -107,14 +142,36 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
             )
             when (createResult) {
                 is AppResult.Error -> {
-                    Log.e(TAG, "Failed to add single event parsedId=${target.id}: ${createResult.message}", createResult.throwable)
-                    _uiState.value = _uiState.value.copy(error = createResult.message, lastSyncStatus = "Add event failed")
+                    Log.e(
+                        TAG,
+                        "Failed to add single event parsedId=${target.id}: ${createResult.message}",
+                        createResult.throwable
+                    )
+                    val rolledBack = (_uiState.value.pendingEvents + targetUi)
+                        .sortedBy { it.startAtMillis }
+                    _uiState.value = _uiState.value.copy(
+                        pendingEvents = rolledBack,
+                        pendingCount = rolledBack.size,
+                        error = createResult.message,
+                        lastSyncStatus = "Add event failed"
+                    )
+                    _snackbarEvents.tryEmit(
+                        SnackbarMessage(
+                            text = createResult.message ?: "Failed to add event",
+                            isError = true
+                        )
+                    )
                 }
                 is AppResult.Success -> {
                     repository.markParsedEventSynced(target.id, createResult.data)
                     repository.markEmailProcessed(target.emailId)
+                    _uiState.value = _uiState.value.copy(
+                        lastSyncStatus = "Event added to your calendar"
+                    )
+                    _snackbarEvents.tryEmit(
+                        SnackbarMessage("Event added to your calendar")
+                    )
                     refreshPendingEvents()
-                    _uiState.value = _uiState.value.copy(lastSyncStatus = "Event added to Google Calendar")
                 }
             }
         }
@@ -122,9 +179,15 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun addAllPendingEventsToCalendar() {
         viewModelScope.launch {
+            val snapshot = _uiState.value.pendingEvents
+            if (snapshot.isEmpty()) return@launch
+            _uiState.value = _uiState.value.copy(pendingEvents = emptyList(), pendingCount = 0)
+
             val pending = repository.getPendingParsedEvents()
             var addedCount = 0
+            val failed = mutableListOf<PendingEventUi>()
             pending.forEach { event ->
+                val uiRow = snapshot.firstOrNull { it.parsedEventId == event.id }
                 when (val createResult = calendarRepository.createEvent(
                     CalendarEvent(
                         id = "",
@@ -136,7 +199,14 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
                         attendees = event.attendees
                     )
                 )) {
-                    is AppResult.Error -> Log.e(TAG, "Failed adding parsedId=${event.id}: ${createResult.message}", createResult.throwable)
+                    is AppResult.Error -> {
+                        Log.e(
+                            TAG,
+                            "Failed adding parsedId=${event.id}: ${createResult.message}",
+                            createResult.throwable
+                        )
+                        if (uiRow != null) failed += uiRow
+                    }
                     is AppResult.Success -> {
                         repository.markParsedEventSynced(event.id, createResult.data)
                         repository.markEmailProcessed(event.emailId)
@@ -144,8 +214,30 @@ class InboxSyncViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
             }
+
+            if (failed.isNotEmpty()) {
+                val restored = (_uiState.value.pendingEvents + failed).sortedBy { it.startAtMillis }
+                _uiState.value = _uiState.value.copy(
+                    pendingEvents = restored,
+                    pendingCount = restored.size
+                )
+            }
             refreshPendingEvents()
-            _uiState.value = _uiState.value.copy(lastSyncStatus = "Added $addedCount event(s) to Google Calendar")
+
+            val statusText = when {
+                addedCount > 0 && failed.isEmpty() ->
+                    "Added $addedCount event(s) to your calendar"
+                addedCount > 0 && failed.isNotEmpty() ->
+                    "Added $addedCount, ${failed.size} failed"
+                else -> "Failed to add ${failed.size} event(s)"
+            }
+            _uiState.value = _uiState.value.copy(lastSyncStatus = statusText)
+            _snackbarEvents.tryEmit(
+                SnackbarMessage(
+                    text = statusText,
+                    isError = addedCount == 0 && failed.isNotEmpty()
+                )
+            )
         }
     }
 
